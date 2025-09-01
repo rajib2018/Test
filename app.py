@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io # Import the io module
 
 # Function to process vibration data
 def process_vibration_data(df):
@@ -166,7 +167,11 @@ if source_file is not None and blank_format_file is not None:
         # Add download button for the combined data
         @st.cache_data
         def convert_df_to_excel(df):
-            return df.to_excel(index=False).encode('utf-8')
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Combined Data')
+            processed_data = output.getvalue()
+            return processed_data
 
         excel_data = convert_df_to_excel(combined_df)
 
