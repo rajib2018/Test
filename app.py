@@ -8,7 +8,7 @@ def load_excel_sheets(file, sheetnames):
     for sheet in sheetnames:
         try:
             df = pd.read_excel(file, sheet_name=sheet)
-            df = df.dropna(how="all")  # 🔹 remove blank rows
+            df = df.dropna(how="all")  # remove blank rows
             data[sheet] = df
         except Exception as e:
             st.error(f"⚠️ Could not load sheet '{sheet}': {e}")
@@ -23,7 +23,7 @@ st.markdown(
     Upload the **Vibration Analysis Report** and the **Blank Format Template**.  
     This app will:
     - Extract **DUST COLLECTION FANS** & **PROCESS FANS**
-    - Reformat into the **Blank Format**
+    - Clean + Align with the **Blank Format**
     - Provide a downloadable Excel file
     """
 )
@@ -40,7 +40,7 @@ if report_file and blank_file:
         # Load blank format structure (first sheet only)
         blank_excel = pd.ExcelFile(blank_file)
         blank_template = pd.read_excel(blank_file, sheet_name=blank_excel.sheet_names[0])
-        blank_template = blank_template.dropna(how="all")  # 🔹 remove blank rows
+        blank_template = blank_template.dropna(how="all")
 
     st.success("✅ Files successfully loaded!")
 
@@ -59,25 +59,49 @@ if report_file and blank_file:
     # ---- TRANSFORMATION ----
     st.header("🔄 Transforming Data into Blank Format")
 
+    # Example column mapping between raw sheet and blank template
+    # (adjust keys/values to match your Blank Format headers exactly)
+    column_map = {
+        "S.NO": "S.NO",
+        "EQUIPMENT NAME": "EQUIPMENT NAME",
+        "DIRECTION": "DIRECTION",
+        "Attribute": "DATE",        # will come from unpivot step if applied
+        "Value": "VALUE",           # vibration measurement
+        "SOURCE_SHEET": "SOURCE",   # custom field we add
+    }
+
     transformed = []
     for sheet_name, df in report_sheets.items():
         df_clean = df.copy()
         df_clean["SOURCE_SHEET"] = sheet_name  # keep track of origin
-        df_clean = df_clean.dropna(how="all")  # 🔹 remove blank rows again before aligning
+        df_clean = df_clean.dropna(how="all")
 
+        # Convert datetime columns to date only
+        for col in df_clean.select_dtypes(include=["datetime64[ns]"]).columns:
+            df_clean[col] = df_clean[col].dt.date
+
+        # Build aligned dataframe
         aligned = pd.DataFrame(columns=blank_template.columns)
-        for col in blank_template.columns:
-            if col in df_clean.columns:
-                aligned[col] = df_clean[col]
-            else:
+        for raw_col, target_col in column_map.items():
+            if raw_col in df_clean.columns and target_col in aligned.columns:
+                aligned[target_col] = df_clean[raw_col]
+
+        # Fill other blank format columns with empty strings
+        for col in aligned.columns:
+            if col not in aligned.columns:
                 aligned[col] = ""
+
         transformed.append(aligned)
 
     # Combine Dust + Process into one DataFrame
     final_df = pd.concat(transformed, ignore_index=True)
-    final_df = final_df.dropna(how="all")  # 🔹 ensure no blank rows in final output
+    final_df = final_df.dropna(how="all")  # ensure no blank rows
+    st.success("✅ Data transformed successfully!")
 
-    st.success("✅ Data transformed successfully (blank rows removed)!")
+    # Ensure DATE column is clean (no timestamp)
+    if "DATE" in final_df.columns:
+        final_df["DATE"] = pd.to_datetime(final_df["DATE"], errors="coerce").dt.date
+
     st.dataframe(final_df.head(20))
 
     # ---- EXPORT TO EXCEL ----
