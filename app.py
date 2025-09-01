@@ -10,6 +10,8 @@ def load_excel_sheets(file, sheetnames):
             df = pd.read_excel(file, sheet_name=sheet)
             df = df.dropna(how="all")  # remove blank rows
             data[sheet] = df
+            st.subheader(f"Preview of loaded sheet: {sheet}") # Add preview here
+            st.dataframe(df.head()) # Add preview here
         except Exception as e:
             st.error(f"⚠️ Could not load sheet '{sheet}': {e}")
     return data
@@ -41,6 +43,9 @@ if report_file and blank_file:
         blank_excel = pd.ExcelFile(blank_file)
         blank_template = pd.read_excel(blank_file, sheet_name=blank_excel.sheet_names[0])
         blank_template = blank_template.dropna(how="all")
+        st.subheader("Preview of Blank Format Template") # Add preview here
+        st.dataframe(blank_template.head()) # Add preview here
+
 
     st.success("✅ Files successfully loaded!")
 
@@ -75,6 +80,9 @@ if report_file and blank_file:
         df_clean = df.copy()
         df_clean["SOURCE_SHEET"] = sheet_name  # keep track of origin
         df_clean = df_clean.dropna(how="all")
+        st.subheader(f"Preview of cleaned data for sheet: {sheet_name}") # Add preview here
+        st.dataframe(df_clean.head()) # Add preview here
+
 
         # Convert datetime columns to date only
         for col in df_clean.select_dtypes(include=["datetime64[ns]"]).columns:
@@ -88,7 +96,7 @@ if report_file and blank_file:
 
         # Fill other blank format columns with empty strings
         for col in aligned.columns:
-             if col not in aligned.columns: # This condition is always false, should be if col not in aligned.columns and col not in column_map.values()
+             if col not in column_map.values() and col in aligned.columns: # Corrected condition
                  aligned[col] = ""
 
         # --- Potentially add logic here to handle unpivoting or specific data extraction based on Blank Format structure ---
@@ -104,6 +112,9 @@ if report_file and blank_file:
              aligned["DATE"] = df_clean["DATE"]
         if "VALUE" in df_clean.columns and "VALUE" in aligned.columns:
              aligned["VALUE"] = df_clean["VALUE"]
+
+        st.subheader(f"Preview of aligned data for sheet: {sheet_name}") # Add preview here
+        st.dataframe(aligned.head()) # Add preview here
 
 
         transformed.append(aligned)
