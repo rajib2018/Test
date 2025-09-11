@@ -1,0 +1,7 @@
+streamlit 
+pytesseract
+PIL
+pandas
+re
+spacy
+uuid 
