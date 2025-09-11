@@ -11,18 +11,39 @@ import io # To handle in-memory files
 # --- Function Definitions (from previous steps) ---
 
 # Load a pre-trained English language model for spaCy
-@st.cache_resource # Cache the model loading for efficiency
+# Using en_core_web_sm as an alternative if en_core_web_sm is not loading
+# Removed @st.cache_resource to test download explicitly
 def load_spacy_model():
     try:
+        # Try loading the small model first
         nlp = spacy.load("en_core_web_sm")
     except OSError:
-        st.warning("Downloading en_core_web_sm model...")
-        from spacy.cli import download
-        download("en_core_web_sm")
-        nlp = spacy.load("en_core_web_sm")
+        try:
+            st.warning("en_core_web_sm not found. Attempting to download...")
+            from spacy.cli import download
+            download("en_core_web_sm")
+            nlp = spacy.load("en_core_web_sm")
+        except Exception as e:
+            st.error(f"Error loading or downloading en_core_web_sm model: {e}")
+            st.info("Attempting to load en_core_web_sm instead...")
+            try:
+                # Fallback to the even smaller model
+                nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                 st.error("en_core_web_sm not found. Please install it by running: !python -m spacy download en_core_web_sm")
+                 return None # Return None if no model can be loaded
+            except Exception as e:
+                 st.error(f"Error loading en_core_web_sm model: {e}")
+                 return None
     return nlp
 
 nlp = load_spacy_model()
+
+# Check if nlp model was loaded successfully
+if nlp is None:
+    st.error("spaCy model could not be loaded. Please check the error messages above and try installing manually.")
+    st.stop() # Stop the Streamlit app if model loading failed
+
 
 def ocr_image_to_text(image_file):
     """
@@ -105,7 +126,7 @@ def extract_invoice_data(text):
     if tax_match:
         extracted_data["Tax Amount"] = tax_match.group(1).strip()
         if extracted_data["Currency"] is None and re.search(r'[\$\£\€]', tax_match.group(1)):
-             extracted_data["Currency"] = re.search(r'[\$\£\€]', tax_match.group(1)).group(0)
+             extracted_data["Currency"] = re.search(r'[\$\$€]', tax_match.group(1)).group(0)
 
 
     # Total Amount
