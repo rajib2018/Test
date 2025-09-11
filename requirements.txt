@@ -1,4 +1,6 @@
-streamlit 
+streamlit
 pytesseract
+Pillow
 pandas
-spacy 
+spacy
+openpyxl
