@@ -4,50 +4,15 @@ from PIL import Image
 import pandas as pd
 import os
 import re
-import spacy
-import uuid # To generate unique filenames
-import io # To handle in-memory files
+import uuid
+import io
 
-# --- Function Definitions (from previous steps) ---
-
-# Load a pre-trained English language model for spaCy
-# Using en_core_web_sm as an alternative if en_core_web_sm is not loading
-# Removed @st.cache_resource to test download explicitly
-def load_spacy_model():
-    try:
-        # Try loading the small model first
-        nlp = spacy.load("en_core_web_sm")
-    except OSError:
-        try:
-            st.warning("en_core_web_sm not found. Attempting to download...")
-            from spacy.cli import download
-            download("en_core_web_sm")
-            nlp = spacy.load("en_core_web_sm")
-        except Exception as e:
-            st.error(f"Error loading or downloading en_core_web_sm model: {e}")
-            st.info("Attempting to load en_core_web_sm instead...")
-            try:
-                # Fallback to the even smaller model
-                nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                 st.error("en_core_web_sm not found. Please install it by running: !python -m spacy download en_core_web_sm")
-                 return None # Return None if no model can be loaded
-            except Exception as e:
-                 st.error(f"Error loading en_core_web_sm model: {e}")
-                 return None
-    return nlp
-
-nlp = load_spacy_model()
-
-# Check if nlp model was loaded successfully
-if nlp is None:
-    st.error("spaCy model could not be loaded. Please check the error messages above and try installing manually.")
-    st.stop() # Stop the Streamlit app if model loading failed
-
+# --- Function Definitions ---
 
 def ocr_image_to_text(image_file):
     """
     Performs OCR on an image file-like object and extracts text content.
+    Requires Tesseract to be installed and in PATH.
 
     Args:
         image_file: A file-like object of the image or scanned document.
@@ -67,11 +32,11 @@ def ocr_image_to_text(image_file):
         st.error(f"An error occurred during OCR: {e}")
         return None
 
-def extract_invoice_data(text):
+def extract_invoice_data_rule_based(text):
     """
-    Extracts data fields from invoice text using spaCy and rule-based methods.
+    Extracts data fields from invoice text using rule-based methods (regex).
+    This is a simplified, non-LLM approach.
     """
-    doc = nlp(text)
     extracted_data = {
         "Invoice Number": None,
         "Invoice Date": None,
@@ -86,116 +51,91 @@ def extract_invoice_data(text):
         "Line Items": []
     }
 
-    # Use spaCy for basic entity recognition (Names, Dates, Money)
-    # Refined: Use entities as hints, but rely more on robust regex for specific fields
-    dates = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
-    if dates:
-        # Simple heuristic: try to find a date near "invoice date" or "date"
-        date_match = re.search(r'(invoice date|date)[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4})', text, re.IGNORECASE)
-        if date_match:
-            extracted_data["Invoice Date"] = date_match.group(2).strip()
-        elif dates:
-             # Fallback to first identified date if keyword match fails
-             extracted_data["Invoice Date"] = dates[0]
-
-
     # Rule-based extraction using regular expressions and keywords
-    # Invoice Number - More flexible regex
+    # Invoice Number
     invoice_number_match = re.search(r'(invoice number|invoice no|invoice #|inv #|bill no)[:\s]*([A-Z0-9\-\/]+)', text, re.IGNORECASE)
     if invoice_number_match:
         extracted_data["Invoice Number"] = invoice_number_match.group(2).strip()
 
-    # Currency Symbol - Look for common symbols globally
+    # Invoice Date - Flexible date formats
+    date_match = re.search(r'(invoice date|date)[:\s]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?(?:,|\s+)\s+\d{4})', text, re.IGNORECASE)
+    if date_match:
+        extracted_data["Invoice Date"] = date_match.group(2).strip()
+
+    # Currency Symbol
     currency_match = re.search(r'([\$\£\€])', text)
     if currency_match:
         extracted_data["Currency"] = currency_match.group(1)
 
-    # Amounts - More robust regex to capture currency symbol and various number formats
-    amount_pattern = r'([\$\£\€]?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?)' # Matches $1,234.56, €10.00, 50.00 etc.
+    # Amounts - Capture currency symbol and various number formats
+    amount_pattern = r'([\$\£\€]?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
 
     # Subtotal Amount
     subtotal_match = re.search(r'(subtotal)[:\s]*' + amount_pattern, text, re.IGNORECASE)
     if subtotal_match:
         extracted_data["Subtotal Amount"] = subtotal_match.group(1).strip()
-        if extracted_data["Currency"] is None and re.search(r'[\$\£\€]', subtotal_match.group(1)):
-             extracted_data["Currency"] = re.search(r'[\$\£\€]', subtotal_match.group(1)).group(0)
-
 
     # Tax Amount
     tax_match = re.search(r'(tax|vat)[:\s]*' + amount_pattern, text, re.IGNORECASE)
     if tax_match:
         extracted_data["Tax Amount"] = tax_match.group(1).strip()
-        if extracted_data["Currency"] is None and re.search(r'[\$\£\€]', tax_match.group(1)):
-             extracted_data["Currency"] = re.search(r'[\$\$€]', tax_match.group(1)).group(0)
 
-
-    # Total Amount
-    # Prioritize keywords like "total", "grand total", "amount due"
+    # Total Amount - Prioritize keywords
     total_match = re.search(r'(total|grand total|amount due)[:\s]*' + amount_pattern, text, re.IGNORECASE)
     if total_match:
         extracted_data["Total Amount"] = total_match.group(1).strip()
-        if extracted_data["Currency"] is None and re.search(r'[\$\£\€]', total_match.group(1)):
-             extracted_data["Currency"] = re.search(r'[\$\£\€]', total_match.group(1)).group(0)
-    elif extracted_data["Subtotal Amount"] and extracted_data["Tax Amount"]:
-        # Simple fallback: if total not found but subtotal and tax are, sum them (requires cleaning amounts first)
-        # This is a basic heuristic and may not be accurate if text includes total before tax/subtotal
-        pass # More complex logic needed here to parse and sum amounts
 
 
-    # Vendor and Customer Names/Addresses - More challenging without layout info.
-    # Basic heuristic: Look for names/orgs near keywords like "Vendor", "Customer", "Bill To", "Ship To"
+    # Vendor and Customer Names (simplified rule-based)
     vendor_match = re.search(r'(vendor|supplier|from)[:\s]*(.+)', text, re.IGNORECASE)
-    if vendor_match and extracted_data["Vendor Name"] is None:
-        # Try to capture the first line after the keyword as the name
+    if vendor_match:
         extracted_data["Vendor Name"] = vendor_match.group(2).split('\n')[0].strip()
 
     customer_match = re.search(r'(customer|client|bill to)[:\s]*(.+)', text, re.IGNORECASE)
-    if customer_match and extracted_data["Customer Name"] is None:
-         # Try to capture the first line after the keyword as the name
+    if customer_match:
          extracted_data["Customer Name"] = customer_match.group(2).split('\n')[0].strip()
 
 
-    # Line Items - Improved regex based on observed patterns.
-    # This regex assumes columns like Description, Quantity, Unit Price, Line Total exist.
-    # It's still a simplification and may fail on complex layouts.
-    # It tries to be more flexible with spacing and currency symbols.
+    # Line Items - Basic regex for structured lines
     line_item_pattern = re.compile(
-        r'(.+?)\s+' # Description (non-greedy) followed by spaces
-        r'(\d+)\s+' # Quantity (one or more digits) followed by spaces
-        + amount_pattern + r'\s+' # Unit Price (using amount pattern) followed by spaces
-        + amount_pattern, # Line Item Total (using amount pattern)
-        re.IGNORECASE | re.DOTALL # Ignore case, allow . to match newline
+        r'(.+?)\s+' # Description
+        r'(\d+)\s+' # Quantity
+        + amount_pattern + r'\s+' # Unit Price
+        + amount_pattern, # Line Item Total
+        re.IGNORECASE | re.DOTALL
     )
 
-    # Look for a potential "line item" section (basic heuristic)
+    # Look for a potential line item section
     lines = text.split('\n')
     line_item_section = False
     section_text = ""
     for i, line in enumerate(lines):
         if re.search(r'(description|item|qty|quantity|unit price|price per unit|amount|total)', line, re.IGNORECASE):
             line_item_section = True
-            # Start searching for line items from this point
             section_text = "\n".join(lines[i:])
             break
 
     if line_item_section:
         for match in line_item_pattern.finditer(section_text):
-            extracted_data["Line Items"].append({
-                "Item Description": match.group(1).strip(),
-                "Quantity": int(match.group(2).strip()),
-                "Unit Price": match.group(3).strip(),
-                "Line Item Total": match.group(4).strip()
-            })
+            try:
+                extracted_data["Line Items"].append({
+                    "Item Description": match.group(1).strip(),
+                    "Quantity": int(match.group(2).strip()),
+                    "Unit Price": match.group(3).strip(),
+                    "Line Item Total": match.group(4).strip()
+                })
+            except ValueError:
+                # Handle cases where quantity is not a valid integer
+                continue # Skip this line item if quantity is invalid
 
 
     return extracted_data
 
-
-def extract_contract_data(text):
+def extract_contract_data_rule_based(text):
     """
-    Refined function to extract data fields from contract text using spaCy and rule-based methods.
+    Extracts data fields from contract text using rule-based methods (regex).
+    This is a simplified, non-LLM approach.
     """
-    doc = nlp(text)
     extracted_data = {
         "Contract Title": None,
         "Party Names": [],
@@ -207,16 +147,12 @@ def extract_contract_data(text):
             "Termination Clause": None,
             "Confidentiality Clause": None,
             # Add more common clauses here if needed
-            "Intellectual Property Clause": None,
-            "Limitation of Liability Clause": None,
-            "Dispute Resolution Clause": None
         }
     }
 
-    # Contract Title - Look for common contract titles near the beginning of the document
+    # Contract Title
     title_match = re.search(r'^(.*?)(agreement|contract|service level agreement|partnership contract|consulting contract)', text, re.IGNORECASE | re.DOTALL)
     if title_match:
-         # Capture the line containing the keyword as the title
          lines_before_keyword = title_match.group(1).split('\n')
          if lines_before_keyword:
              extracted_data["Contract Title"] = (lines_before_keyword[-1] + title_match.group(2)).strip()
@@ -224,27 +160,25 @@ def extract_contract_data(text):
              extracted_data["Contract Title"] = title_match.group(2).strip()
 
 
-    # Party Names - Use spaCy entities near keywords like "between", "parties", "and"
+    # Party Names (Simplified rule-based - look for names near keywords)
     party_keywords = re.search(r'(between|parties|and)[:\s]*(.+)', text, re.IGNORECASE | re.DOTALL)
     if party_keywords:
-        # Process the text following the party keyword
-        party_text = party_keywords.group(2).split('\n')[0:5] # Look at the next few lines
-        party_doc = nlp("\n".join(party_text))
-        for ent in party_doc.ents:
-            if (ent.label_ == "ORG" or ent.label_ == "PERSON") and ent.text.strip() not in extracted_data["Party Names"]:
-                 extracted_data["Party Names"].append(ent.text.strip())
+        potential_parties_text = party_keywords.group(2).split('\n')[0:5]
+        # Basic heuristic: look for capitalized words or phrases as potential names
+        for line in potential_parties_text:
+            potential_names = re.findall(r'[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*', line)
+            for name in potential_names:
+                 if len(name.split()) > 1 and name.strip() not in extracted_data["Party Names"]: # Filter short single words
+                     extracted_data["Party Names"].append(name.strip())
 
-    # Dates - More robust date extraction and association with keywords
+
+    # Dates
     date_pattern_flexible = r'(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}|\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?(?:,|\s+)\s+\d{4})'
 
     # Effective Date
     effective_date_match = re.search(r'(effective date|date of effect)[:\s]*' + date_pattern_flexible, text, re.IGNORECASE)
     if effective_date_match:
         extracted_data["Effective Date"] = effective_date_match.group(1).strip()
-    elif [ent.text for ent in doc.ents if ent.label_ == "DATE"]:
-         # Fallback to first date entity if keyword not found
-         extracted_data["Effective Date"] = [ent.text for ent in doc.ents if ent.label_ == "DATE"][0]
-
 
     # Expiration Date
     expiration_date_match = re.search(r'(expiration date|expires on|term ends)[:\s]*' + date_pattern_flexible, text, re.IGNORECASE)
@@ -252,33 +186,30 @@ def extract_contract_data(text):
         extracted_data["Expiration Date"] = expiration_date_match.group(1).strip()
 
 
-    # Governing Law - Look for keywords and capture the relevant sentence/phrase
+    # Governing Law
     governing_law_match = re.search(r'(governing law|jurisdiction|this agreement shall be governed by)[:\s]*(.+?[\.\n])', text, re.IGNORECASE | re.DOTALL)
     if governing_law_match:
         extracted_data["Governing Law"] = (governing_law_match.group(1) + governing_law_match.group(2)).strip()
 
 
-    # Key Clauses - More flexible keyword search and extraction of a surrounding text block
+    # Key Clauses (Simplified rule-based - look for keywords and extract surrounding text)
     keywords = {
         "Payment Terms": ["payment terms", "billing", "fees", "compensation"],
         "Termination Clause": ["termination", "expiration", "term and termination", "terminate"],
         "Confidentiality Clause": ["confidentiality", "non-disclosure", "confidential information"],
-        "Intellectual Property Clause": ["intellectual property", "ip rights"],
-        "Limitation of Liability Clause": ["limitation of liability", "liability"],
-        "Dispute Resolution Clause": ["dispute resolution", "arbitration", "governing law"] # Governing law often near dispute resolution
+        # Add more common clauses here if needed with their keywords
     }
 
     for clause, terms in keywords.items():
         for term in terms:
-            # Search for the term and extract a larger section of text around it
-            # This regex attempts to capture a paragraph or multiple lines around the keyword
-            clause_match = re.search(r'(.{0,300}' + re.escape(term) + r'.{0,500})', text, re.IGNORECASE | re.DOTALL)
+            # Search for the term and extract a section of text around it
+            clause_match = re.search(r'(.{0,200}' + re.escape(term) + r'.{0,200})', text, re.IGNORECASE | re.DOTALL)
             if clause_match:
                 extracted_data["Key Clauses"][clause] = clause_match.group(1).strip()
                 break # Stop searching for this clause once a match is found
 
 
-    return extracted_data
+    return extracted_contract_data_rule_based
 
 
 def structure_invoice_data_for_excel(extracted_invoice_data):
@@ -355,9 +286,6 @@ def structure_contract_data_for_excel(extracted_contract_data):
         "Payment Terms Clause": extracted_contract_data.get("Key Clauses", {}).get("Payment Terms"),
         "Termination Clause": extracted_contract_data.get("Key Clauses", {}).get("Termination Clause"),
         "Confidentiality Clause": extracted_contract_data.get("Key Clauses", {}).get("Confidentiality Clause"),
-        "Intellectual Property Clause": extracted_contract_data.get("Key Clauses", {}).get("Intellectual Property Clause"),
-        "Limitation of Liability Clause": extracted_contract_data.get("Key Clauses", {}).get("Limitation of Liability Clause"),
-        "Dispute Resolution Clause": extracted_contract_data.get("Key Clauses", {}).get("Dispute Resolution Clause")
         # Add other contract fields as needed
     }]
 
@@ -396,8 +324,9 @@ def generate_excel_file(invoice_data_list, contract_data_list):
 
 # --- Streamlit App ---
 
-st.title("Intelligent Document Processor")
+st.title("Intelligent Document Processor (Rule-Based)")
 st.write("Upload an invoice or contract image/PDF to extract data into an Excel file.")
+st.write("Note: This version uses rule-based extraction, not LLMs.")
 
 uploaded_file = st.file_uploader("Choose a document (Image or PDF)", type=["png", "jpg", "jpeg", "pdf"])
 
@@ -409,50 +338,23 @@ if uploaded_file is not None:
     # stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
     # st.write(stringio.read())
 
+    extracted_text = None
+    extracted_data = None
+    structured_invoice_data = []
+    structured_contract_data = []
+
     # Check file type and process
     if file_details["FileType"] in ["image/png", "image/jpeg"]:
-        st.info("Processing as an image (Invoice assumed for now)...")
-        # Pass the file-like object directly to the OCR function
+        st.info("Processing as an image (assuming Invoice or Contract)...")
         extracted_text = ocr_image_to_text(uploaded_file)
 
-        if extracted_text:
-            st.subheader("Extracted Text:")
-            st.text(extracted_text)
-
-            st.info("Extracting Invoice Data...")
-            extracted_data = extract_invoice_data(extracted_text)
-            structured_invoice_data = structure_invoice_data_for_excel(extracted_data)
-            structured_contract_data = [] # No contract data from image (for this simplified example)
-
-            st.subheader("Extracted and Structured Data (Invoice):")
-            if structured_invoice_data:
-                 st.dataframe(pd.DataFrame(structured_invoice_data))
-            else:
-                 st.write("No structured invoice data extracted.")
-
-
-            excel_bytes = generate_excel_file(structured_invoice_data, structured_contract_data)
-
-            if excel_bytes:
-                st.download_button(
-                    label="Download Extracted Data (Excel)",
-                    data=excel_bytes,
-                    file_name=f"extracted_invoice_{uuid.uuid4().hex}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
     elif file_details["FileType"] == "application/pdf":
-        st.info("Processing as a PDF (Contract assumed for now)...")
-        # For PDF, you would typically need a library to extract text from PDF
-        # or use a cloud OCR/Document AI service that handles PDFs.
-        # As a placeholder, we will simulate text extraction from PDF.
-
-        # --- Placeholder for PDF Text Extraction ---
-        st.warning("PDF text extraction is not fully implemented in this example.")
+        st.info("Processing as a PDF (assuming Invoice or Contract)...")
+        # --- Placeholder for PDF Text Extraction (Rule-Based) ---
+        st.warning("PDF text extraction requires additional libraries (like pdfminer.six).")
         st.warning("Using dummy text for PDF processing.")
 
-        # Simulate text extraction for PDF
-        # In a real application, use a library like pdfminer.six or a cloud service
+        # Simulate text extraction for PDF (replace with actual PDF text extraction)
         dummy_pdf_text = """
         CONFIDENTIAL AGREEMENT
 
@@ -473,44 +375,71 @@ if uploaded_file is not None:
         Governing Law: This Agreement shall be governed by the laws of the State of California.
         """
         extracted_text = dummy_pdf_text # Use dummy text
-
         # --- End of Placeholder ---
-
-
-        if extracted_text:
-            st.subheader("Simulated Extracted Text from PDF:")
-            st.text(extracted_text)
-
-            st.info("Extracting Contract Data...")
-            extracted_data = extract_contract_data(extracted_text)
-            structured_contract_data = structure_contract_data_for_excel(extracted_data)
-            structured_invoice_data = [] # No invoice data from contract (for this simplified example)
-
-            st.subheader("Extracted and Structured Data (Contract):")
-            if structured_contract_data:
-                 st.dataframe(pd.DataFrame(structured_contract_data))
-            else:
-                 st.write("No structured contract data extracted.")
-
-
-            excel_bytes = generate_excel_file(structured_invoice_data, structured_contract_data)
-
-            if excel_bytes:
-                st.download_button(
-                    label="Download Extracted Data (Excel)",
-                    data=excel_bytes,
-                    file_name=f"extracted_contract_{uuid.uuid4().hex}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
 
     else:
         st.error("Unsupported file type. Please upload an image (PNG, JPG) or PDF.")
 
+
+    if extracted_text:
+        st.subheader("Extracted Text:")
+        st.text(extracted_text)
+
+        # Basic check to assume document type for rule-based extraction
+        # In a real app, you might need more sophisticated classification
+        document_type = None
+        if re.search(r'invoice', extracted_text, re.IGNORECASE):
+            document_type = "invoice"
+            st.info("Document identified as Invoice.")
+            extracted_data = extract_invoice_data_rule_based(extracted_text)
+            structured_invoice_data = structure_invoice_data_for_excel(extracted_data)
+
+        elif re.search(r'agreement|contract', extracted_text, re.IGNORECASE):
+             document_type = "contract"
+             st.info("Document identified as Contract.")
+             # Note: The function call below was incorrect in the previous response. Corrected.
+             extracted_data = extract_contract_data_rule_based(extracted_text)
+             structured_contract_data = structure_contract_data_for_excel(extracted_data)
+
+
+        else:
+            st.warning("Could not confidently determine document type (Invoice or Contract).")
+            st.info("Attempting extraction for both types...")
+            # Attempt both extractions if type is ambiguous
+            extracted_invoice_data = extract_invoice_data_rule_based(extracted_text)
+            structured_invoice_data = structure_invoice_data_for_excel(extracted_invoice_data)
+
+            extracted_contract_data = extract_contract_data_rule_based(extracted_text)
+            structured_contract_data = structure_contract_data_for_excel(extracted_contract_data)
+            extracted_data = {"Invoice Data": extracted_invoice_data, "Contract Data": extracted_contract_data}
+
+
+        st.subheader("Extracted and Structured Data:")
+        if structured_invoice_data:
+             st.write("Invoice Data:")
+             st.dataframe(pd.DataFrame(structured_invoice_data))
+        if structured_contract_data:
+             st.write("Contract Data:")
+             st.dataframe(pd.DataFrame(structured_contract_data))
+
+        # Generate Excel file if any data was extracted and structured
+        if structured_invoice_data or structured_contract_data:
+             excel_bytes = generate_excel_file(structured_invoice_data, structured_contract_data)
+
+             if excel_bytes:
+                 st.download_button(
+                     label="Download Extracted Data (Excel)",
+                     data=excel_bytes,
+                     file_name=f"extracted_data_{uuid.uuid4().hex}.xlsx",
+                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                 )
+        else:
+            st.warning("No relevant data extracted for either Invoice or Contract format.")
+
+
 st.markdown("---")
-st.write("Note: This is a basic implementation. For production use, consider:")
-st.write("- More robust OCR for various layouts and document types.")
-st.write("- Advanced NLP for more accurate and comprehensive data extraction.")
-st.write("- Handling multi-page documents.")
-st.write("- Error handling for poor quality scans.")
-st.write("- More sophisticated UI/UX.")
+st.write("Note: This is a basic rule-based implementation.")
+st.write("Rule-based extraction is highly dependent on consistent document layouts and phrasing.")
+st.write("Accuracy may vary significantly across different document formats.")
+st.write("For improved accuracy and flexibility, consider integrating LLMs or specialized document AI services.")
+st.write("Manual installation of Tesseract OCR engine is required.")
